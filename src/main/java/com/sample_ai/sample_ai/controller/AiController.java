@@ -1,10 +1,7 @@
 package com.sample_ai.sample_ai.controller;
 
-
-import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.ai.chat.prompt.PromptTemplate;
-import org.springframework.ai.converter.BeanOutputConverter;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -12,44 +9,39 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.sample_ai.sample_ai.response.AiResponse;
 
-import java.util.Map;
 @RestController
 @RequestMapping("/api/ai")
+@CrossOrigin(origins = "http://localhost:4200") // SBLOCCA LE CHIAMATE DA ANGULAR
 public class AiController {
 
-    // L'interfaccia agnostica di Spring AI per dialogare con gli LLM
-    private final ChatModel chatModel;
+    private final ChatClient chatClient;
 
-    // Dependency Injection classica tramite costruttore
-    public AiController(ChatModel chatModel) {
-        this.chatModel = chatModel;
+    public AiController(ChatClient.Builder chatClientBuilder) {
+        this.chatClient = chatClientBuilder.build(); 
     }
 
     @GetMapping("/generate")
     public AiResponse generate(@RequestParam(value = "message") String message) {
         
-        // 1. Inizializziamo il convertitore specificando la classe target
-        BeanOutputConverter<AiResponse> converter = new BeanOutputConverter<>(AiResponse.class);
-
-        // 2. Creiamo un template per il prompt, iniettando le regole di formattazione JSON obbligatorie
-        String template = """
-                Spiega il seguente argomento: {utenteMessage}.
-                
-                {format}
-                """;
-
-        PromptTemplate promptTemplate = new PromptTemplate(template);
-        
-        // 3. Uniamo il messaggio dell'utente con le istruzioni del formato JSON generate automaticamente
-        Prompt prompt = promptTemplate.create(Map.of(
-                "utenteMessage", message,
-                "format", converter.getFormat() 
-        ));
-
-        // 4. Invochiamo il modello
-        String rawResponse = chatModel.call(prompt).getResult().getOutput().getContent();
-
-        // 5. Convertiamo la stringa JSON nell'oggetto Java e lo restituiamo (Spring Boot lo mostrerà come JSON)
-        return converter.convert(rawResponse);
+        return chatClient.prompt()
+            .system("""
+                    Sei un assistente tecnico avanzato. 
+                    Devi rispondere ESCLUSIVAMENTE in lingua italiana. 
+                    È tassativamente vietato l'uso di caratteri, ideogrammi o parole in cinese o in inglese.
+                    Tutte le chiavi e i valori del JSON devono essere in italiano.
+                    """)
+            .user(u -> u.text("""
+                    Spiegami in modo tecnico: {argomento}.
+                    
+                    REGOLE DI FORMATTAZIONE IMPERATIVE:
+                    1. Restituisci ESCLUSIVAMENTE JSON grezzo valido.
+                    2. NON usare la formattazione Markdown e NON usare i backtick.
+                    3. Inizia la risposta direttamente con una parentesi graffa di apertura e terminala con una di chiusura.
+                    """)
+                    .param("argomento", message))
+            // FIX 2: Rimosso il blocco ".options()", la temperatura ora è nel file application.properties!
+            .call()
+            // FIX 3: La classe ora viene riconosciuta correttamente grazie all'import giusto
+            .entity(AiResponse.class);
     }
 }
