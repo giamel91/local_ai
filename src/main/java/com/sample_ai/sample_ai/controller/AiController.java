@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.sample_ai.sample_ai.response.AiResponse;
+import com.sample_ai.sample_ai.service.AiService;
 import com.sample_ai.sample_ai.service.KafkaConsumerService;
 import com.sample_ai.sample_ai.service.KafkaProducerService;
 
@@ -18,41 +19,23 @@ import com.sample_ai.sample_ai.service.KafkaProducerService;
 @CrossOrigin(origins = "http://localhost:4200") // SBLOCCA LE CHIAMATE DA ANGULAR
 public class AiController {
 
-    private final ChatClient chatClient;
     private final KafkaProducerService kafkaProducer;
     private final KafkaConsumerService kafkaConsumerService;
+    private final AiService aiService;
+
 
     public AiController(ChatClient.Builder chatClientBuilder,KafkaProducerService kafkaProducer,
-    		KafkaConsumerService kafkaConsumerService) {
-        this.chatClient = chatClientBuilder.build();
+    		KafkaConsumerService kafkaConsumerService, AiService aiService) {
         this.kafkaProducer = kafkaProducer;
         this.kafkaConsumerService = kafkaConsumerService;
+		this.aiService = aiService;
     }
     
 
     @GetMapping("/generate")
     public AiResponse generate(@RequestParam(value = "message") String message) {
     	System.out.println(">>> Richiesta ricevuta dal frontend! Domanda: " + message);
-        AiResponse answer=  chatClient.prompt()
-            .system("""
-                    Sei un assistente tecnico avanzato. 
-                    Devi rispondere ESCLUSIVAMENTE in lingua italiana. 
-                    È tassativamente vietato l'uso di caratteri, ideogrammi o parole in cinese o in inglese.
-                    Tutte le chiavi e i valori del JSON devono essere in italiano.
-                    """)
-            .user(u -> u.text("""
-                    Spiegami in modo tecnico: {argomento}.
-                    
-                    REGOLE DI FORMATTAZIONE IMPERATIVE:
-                    1. Restituisci ESCLUSIVAMENTE JSON grezzo valido.
-                    2. NON usare la formattazione Markdown e NON usare i backtick.
-                    3. Inizia la risposta direttamente con una parentesi graffa di apertura e terminala con una di chiusura.
-                    """)
-                    .param("argomento", message))
-            // FIX 2: Rimosso il blocco ".options()", la temperatura ora è nel file application.properties!
-            .call()
-            // FIX 3: La classe ora viene riconosciuta correttamente grazie all'import giusto
-            .entity(AiResponse.class);
+        AiResponse answer=aiService.askAi(message);
         System.out.println("<<< Risposta generata da Qwen: " + answer);
         kafkaProducer.inviaRisposta(answer);
         return answer;
