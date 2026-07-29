@@ -1,5 +1,13 @@
 package com.sample_ai.sample_ai.service;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
+
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.stereotype.Service;
 
 import com.sample_ai.sample_ai.response.AiResponse;
@@ -9,36 +17,60 @@ import com.sample_ai.sample_ai.response.AiResponse;
 public class AiService {
 	
     private final ChatClient chatClient;
+    private final KafkaProducerService kafkaProducer;
+    private final VectorStore vectorStore;
 
 
-    public AiService(ChatClient.Builder chatClientBuilder) {
+
+
+    public AiService(ChatClient.Builder chatClientBuilder,KafkaProducerService kafkaProducer, VectorStore vectorStore) {
         this.chatClient = chatClientBuilder.build();
+        this.kafkaProducer = kafkaProducer;
+        this.vectorStore= vectorStore;
+
 
     }
     
 	
 	public AiResponse  askAi(String message) {
 		
+        List<Document> docs = vectorStore.similaritySearch(
+                SearchRequest.query(message).withTopK(4)
+        );
+        
+        List<Document> docsSafe = docs != null ? docs : Collections.emptyList();
+
+        String context = docsSafe.stream()
+                .map(Document::getContent)   // su M1 quasi sempre questo
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .collect(Collectors.joining("\n\n---\n\n"));
+        
+   
 		AiResponse answer = chatClient.prompt()
         .system("""
-                Sei un assistente tecnico avanzato. 
-                Devi rispondere ESCLUSIVAMENTE in lingua italiana. 
-                È tassativamente vietato l'uso di caratteri, ideogrammi o parole in cinese o in inglese.
-                Tutte le chiavi e i valori del JSON devono essere in italiano.
+        		Sei un assistente tecnico avanzato.
+                Rispondi solo in italiano.
+                Usa prima il contesto recuperato; se non basta, dillo chiaramente.
+                Restituisci solo JSON valido.
                 """)
         .user(u -> u.text("""
-                Spiegami in modo tecnico: {argomento}.
-                
-                REGOLE DI FORMATTAZIONE IMPERATIVE:
-                1. Restituisci ESCLUSIVAMENTE JSON grezzo valido.
-                2. NON usare la formattazione Markdown e NON usare i backtick.
-                3. Inizia la risposta direttamente con una parentesi graffa di apertura e terminala con una di chiusura.
+                CONTESTO:
+                {context}
+
+                DOMANDA:
+                {argomento}
                 """)
-                .param("argomento", message))
+                .param("context", context)
+        		.param("argomento", message))
+
         // FIX 2: Rimosso il blocco ".options()", la temperatura ora è nel file application.properties!
         .call()
         // FIX 3: La classe ora viene riconosciuta correttamente grazie all'import giusto
         .entity(AiResponse.class);
+        kafkaProducer.inviaRisposta(answer);
+
 		return answer;
 		
 		
