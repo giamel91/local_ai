@@ -35,26 +35,40 @@ public class AiService {
 	public AiResponse  askAi(String message) {
 		
         List<Document> docs = vectorStore.similaritySearch(
-                SearchRequest.query(message).withTopK(4)
+                SearchRequest.query(message).withTopK(5)
         );
         
         List<Document> docsSafe = docs != null ? docs : Collections.emptyList();
 
         String context = docsSafe.stream()
-                .map(Document::getContent)   // su M1 quasi sempre questo
+                .filter(doc -> {
+                    Object distanceValue = doc.getMetadata() != null
+                            ? doc.getMetadata().getOrDefault("distance", 1.0)
+                            : 1.0;
+                    double threshold = 0.35;  // Only highly relevant documents
+                    if (distanceValue instanceof Number) {
+                        return ((Number) distanceValue).doubleValue() < threshold;
+                    }
+                    return false;
+                })
+                .map(Document::getContent)
                 .filter(Objects::nonNull)
                 .map(String::trim)
-                .filter(s -> !s.isEmpty())
+                .filter(content -> !content.isBlank())
                 .collect(Collectors.joining("\n\n---\n\n"));
-        
+    
    
 		AiResponse answer = chatClient.prompt()
         .system("""
-        		Sei un assistente tecnico avanzato.
-                Rispondi solo in italiano.
-                Usa prima il contesto recuperato; se non basta, dillo chiaramente.
-                Restituisci solo JSON valido.
-                """)
+       Sei un assistente tecnico avanzato.
+    Rispondi SEMPRE in italiano.
+    
+    IMPORTANTE: Usa SOLO il contesto fornito per le tue risposte.
+    Se il contesto non contiene informazioni sufficienti, dillo chiaramente.
+    Non usare conoscenze esterne, solo ciò che è nel CONTESTO.
+    
+    Restituisci solo JSON valido con i campi "risposta" e "fonte".
+    """)
         .user(u -> u.text("""
                 CONTESTO:
                 {context}

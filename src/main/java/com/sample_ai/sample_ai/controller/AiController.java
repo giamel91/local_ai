@@ -108,12 +108,22 @@ public class AiController {
     @GetMapping("/search")
     public List<Map<String, Object>> search(
             @RequestParam String query,
-            @RequestParam(defaultValue = "4") int k) {
+            @RequestParam(defaultValue = "4") int k,
+            @RequestParam(defaultValue = "0.35") double maxDistance) {
 
         return vectorStore.similaritySearch(SearchRequest.query(query).withTopK(k))
                 .stream()
+                .filter(d -> {
+                    Object distanceValue = d.getMetadata() != null
+                            ? d.getMetadata().getOrDefault("distance", 1.0)
+                            : 1.0;
+                    if (distanceValue instanceof Number) {
+                        return ((Number) distanceValue).doubleValue() < maxDistance;
+                    }
+                    return false;
+                })
                 .map(d -> Map.of(
-                    "testo", d.getContent() , 
+                    "testo", d.getContent(),
                     "metadata", d.getMetadata()
                 ))
                 .toList();
