@@ -9,7 +9,6 @@ import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -24,7 +23,7 @@ import com.sample_ai.sample_ai.service.KafkaProducerService;
 
 @RestController
 @RequestMapping("/api/ai")
-@CrossOrigin(origins = "http://localhost:4200") // SBLOCCA LE CHIAMATE DA ANGULAR
+// CORS is configured globally in WebConfig (app.cors.allowed-origins).
 public class AiController {
 
     private final KafkaConsumerService kafkaConsumerService;
@@ -95,7 +94,7 @@ public class AiController {
             documenti.add(new Document(chunks.get(i), metadata));
         }
 
-        vectorStore.accept(documenti);
+        vectorStore.add(documenti);
 
         return Map.of(
             "status", "Successo! Testo vettorizzato e salvato in ChromaDB.",
@@ -111,7 +110,7 @@ public class AiController {
             @RequestParam(defaultValue = "4") int k,
             @RequestParam(defaultValue = "0.35") double maxDistance) {
 
-        return vectorStore.similaritySearch(SearchRequest.query(query).withTopK(k))
+        return vectorStore.similaritySearch(SearchRequest.builder().query(query).topK(k).build())
                 .stream()
                 .filter(d -> {
                     Object distanceValue = d.getMetadata() != null
@@ -123,7 +122,7 @@ public class AiController {
                     return false;
                 })
                 .map(d -> Map.of(
-                    "testo", d.getContent(),
+                    "testo", d.getText(),
                     "metadata", d.getMetadata()
                 ))
                 .toList();

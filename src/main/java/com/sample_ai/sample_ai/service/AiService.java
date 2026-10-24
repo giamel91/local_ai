@@ -35,7 +35,7 @@ public class AiService {
 	public AiResponse  askAi(String message) {
 		
         List<Document> docs = vectorStore.similaritySearch(
-                SearchRequest.query(message).withTopK(5)
+                SearchRequest.builder().query(message).topK(5).build()
         );
         
         List<Document> docsSafe = docs != null ? docs : Collections.emptyList();
@@ -51,7 +51,7 @@ public class AiService {
                     }
                     return false;
                 })
-                .map(Document::getContent)
+                .map(Document::getText)
                 .filter(Objects::nonNull)
                 .map(String::trim)
                 .filter(content -> !content.isBlank())
