@@ -75,8 +75,16 @@ aws sts get-caller-identity
 - [x] **Reboot test passed** (`aws ec2 reboot-instances`, whole OS restart): back in
       **40 s** with no manual intervention. `docker` is `systemctl is-enabled`, every
       service has `restart: unless-stopped`, the `app_chroma-data` volume reattaches and
-      the acme.sh cron entry survives. Not proven by this test: that the Elastic IP
-      survives stop/start — a soft reboot keeps the IP by definition.
+      the acme.sh cron entry survives.
+- [x] **Stop/start test passed** (`stop-instances` -> `start-instances`, full
+      deallocation): public IP stayed **`18.102.200.77`**, status checks OK in 158 s, the
+      stack came back by itself and the API answered in 2.5 s. This is what confirms the
+      Elastic IP earns its keep — without it the address would have changed.
+- [x] **nginx hardened:** `server_tokens off` (no version in `Server`), HSTS
+      `max-age=15552000` (no `includeSubDomains`, no `preload`), `X-Content-Type-Options:
+      nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`; `/api/` rate limited to
+      `10r/s` with `burst=20 nodelay`, answered as **429**. Verified: a 40-request burst
+      produced 22x200 + 18x429, and a single request after 3 s returned 200 again.
 
 Public IP is the Elastic IP `18.102.200.77`; it no longer changes on stop/start.
 Re-read it with:
@@ -191,9 +199,14 @@ Three traps that bit during setup:
   Fixed properly by skipping the call outside a browser:
   `if (!isPlatformBrowser(this.platformId)) return;` (and not by the `prerender: false`
   flag, which the CLI ignored).
-- **Cache headers:** hashed assets get `public, max-age=31536000, immutable`;
-  `index.html` gets `no-cache`. Without the second half a deploy stays invisible in a
-  browser that cached the shell.
+- **Cache headers:** hashed assets get `max-age=31536000`; `index.html` gets `no-cache`.
+  Without the second half a deploy stays invisible in a browser that cached the shell.
+- **`add_header` does not inherit.** A `location` that defines its own `add_header`
+  discards every header set at `server` level, so HSTS would silently vanish from exactly
+  the `.js`/`.css` responses a downgrade attack targets. Fixed by keeping the security
+  headers only at server level and using the `expires` directive for caching, since
+  `expires` does not break inheritance. Cost: assets lost the `immutable` token
+  (they are now `max-age=31536000`, not `public, max-age=31536000, immutable`).
 
 ## TLS and DNS
 
