@@ -72,6 +72,11 @@ aws sts get-caller-identity
       (`http://localhost:8080`, used by `ng serve`) is swapped for
       `environment.production.ts` (`''` -> relative `/api/...`) via `fileReplacements`
       in `angular.json`.
+- [x] **Reboot test passed** (`aws ec2 reboot-instances`, whole OS restart): back in
+      **40 s** with no manual intervention. `docker` is `systemctl is-enabled`, every
+      service has `restart: unless-stopped`, the `app_chroma-data` volume reattaches and
+      the acme.sh cron entry survives. Not proven by this test: that the Elastic IP
+      survives stop/start — a soft reboot keeps the IP by definition.
 
 Public IP is the Elastic IP `18.102.200.77`; it no longer changes on stop/start.
 Re-read it with:
