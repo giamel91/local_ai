@@ -31,3 +31,10 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### TLS material (issued on the host by acme.sh, never committed) ###
+certs/
+*.pem
+
+### Local secrets: holds a live provider API key, never commit ###
+init_deepseek.ps1

@@ -1,0 +1,20 @@
+# Build output - never needed inside the image, keeps it small and fast
+target/
+
+# Git + IDE metadata
+.git/
+.github/
+.vscode/
+.settings/
+.project
+.classpath
+.factorypath
+
+# Maven wrapper - we use the maven image instead
+.mvn/
+mvnw
+mvnw.cmd
+
+# Docs
+*.md
+HELP.md
