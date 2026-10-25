@@ -387,23 +387,94 @@ ssh -i $pem ec2-user@18.102.200.77 "export DuckDNS_Token=<token>; ~/.acme.sh/acm
 
 ---
 
-## What actually runs where
+## What is where
 
-Nothing model-related is in the container. The API image is just the Spring Boot jar.
+Nothing model-related is in any container. The API image is just the Spring Boot jar.
+
+### Map
+
+```
+                        INTERNET
+                            |
+              DNS: arlingtonqwen.duckdns.org  (DuckDNS, free)
+                            |
+                            v
++---------------------------------------------------------------+
+|  YOUR AWS ACCOUNT  401905377384   region eu-south-1           |
+|                                                               |
+|   +-------------------------------------------------------+   |
+|   |  VPC (default)                                        |   |
+|   |                                                       |   |
+|   |   Security group sg-01918d764450132ea                 |   |
+|   |   inbound: 443, 80 (world)   |   22: CLOSED           |   |
+|   |                                                       |   |
+|   |   +-----------------------------------------------+   |   |
+|   |   |  EC2 instance i-0a904020481f92b78             |   |   |
+|   |   |  t3.small : 2 vCPU, 2 GB RAM, AL2023          |   |   |
+|   |   |                                               |   |   |
+|   |   |  ONE Linux kernel. Docker daemon.             |   |   |
+|   |   |                                               |   |   |
+|   |   |  +---------+ +---------+ +----------+         |   |   |
+|   |   |  | nginx   | | api     | | chroma   |         |   |   |
+|   |   |  | :80/443 | | :8080   | | :8000    |         |   |   |
+|   |   |  | static  | | jar     | | vectors  |         |   |   |
+|   |   |  +---------+ +---------+ +----------+         |   |   |
+|   |   |      share the same CPU and RAM               |   |   |
+|   |   |      nothing is reserved for any of them      |   |   |
+|   |   |                                               |   |   |
+|   |   |  EBS gp3 20 GB -> images, chroma.sqlite3,     |   |   |
+|   |   |                   certs, frontend files       |   |   |
+|   |   |  Elastic IP 18.102.200.77                     |   |   |
+|   |   |  SSM agent (outbound 443 only)                |   |   |
+|   |   +-----------------------------------------------+   |   |
+|   |                                                       |   |
+|   |   ECR (only if created): image storage                |   |
+|   +-------------------------------------------------------+   |
+|                                                               |
++---------------------------------------------------------------+
+                            |
+                            |  outbound HTTPS 443, TLS + SigV4
+                            |  request: prompt   /   response: tokens
+                            v
++---------------------------------------------------------------+
+|  AMAZON BEDROCK   (AWS-owned fleet, NOT your account)         |
+|                                                               |
+|   qwen.qwen3-32b-v1:0     <- the weights live HERE, no copy   |
+|   Titan Text Embeddings v2   is ever sent to your instance    |
+|                                                               |
+|   their GPUs, racks, maintenance and power                    |
++---------------------------------------------------------------+
+```
+
+### Bits
 
 | Piece | Where |
 |---|---|
 | nginx (TLS endpoint + static frontend) | container `nginx` on the EC2 instance, ports 80/443 |
 | Angular app (static files) | `/home/ec2-user/app/frontend` on the instance, mounted into nginx |
 | Spring Boot API | container `sample-ai-api` on the EC2 instance, 8080 on loopback |
-| ChromaDB | container `chroma` on the EC2 instance (volume `chroma-data`) |
-| Qwen3 32B chat + Titan v2 embeddings | **Amazon Bedrock**, managed — called over HTTPS, auth via the EC2 instance role |
+| ChromaDB (corpus + Titan vectors) | container `chroma` on the EC2 instance (volume `chroma-data`) |
+| Qwen3 32B chat + Titan v2 embeddings | **Amazon Bedrock**, managed - called over HTTPS, auth via the EC2 instance role |
 
 Request path: browser -> `https://arlingtonqwen.duckdns.org` -> nginx (TLS ends here) ->
-static files for `/`, or `http://api:8080` over the compose network for `/api/` ->
-Bedrock over HTTPS.
+static files for `/`, or `http://api:8080` over the compose network for `/api/` -> embed the
+question with Titan v2 -> nearest chunks from Chroma -> Qwen3 on Bedrock -> JSON back.
 
-So a 2 GB `t3.small` is enough: no model weights are loaded locally.
+### Two boundaries worth knowing
+
+**Nothing is reserved for a container.** The three containers are ordinary processes on one
+kernel, sharing the same 2 vCPU and 2 GB RAM. There are no `cpus:` or `mem_limit:` entries
+in `docker-compose.yml`, so there is no reservation at all: if one grows, the kernel's OOM
+killer shoots the largest. The only genuinely reserved resources are the EBS volume (20 GB,
+billed whether used or not) and the Elastic IP.
+
+**Bedrock is outside the account.** It is not a second instance and no slice of this machine
+is set aside for it. A 32B model needs tens of GB of weights plus a GPU, against 20 GB of
+disk and no GPU here - which is the entire reason Bedrock exists. Its consequences: stopping
+the instance leaves Bedrock untouched but unreachable; a Bedrock outage would still serve
+static files and `/health`, only `/api/ai/*` would fail; and the model is reachable only
+from inside the instance role, never from your laptop's `default` profile (which holds
+`bedrock:InvokeModel` for local testing).
 
 ---
 
