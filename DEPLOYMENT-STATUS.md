@@ -22,6 +22,7 @@ Goal: run this API on AWS so the LLM runs in the cloud (no local GPU needed).
 |---|---|---|---|
 | `default` | `sample-ai-dev` | `bedrock:InvokeModel` only | app credentials for local testing |
 | `deploy` | `sample-ai-deploy` | `AmazonEC2ContainerRegistryPowerUser`, `AmazonEC2FullAccess`, `SampleAiDeployIamPolicy` (scoped IAM) | infrastructure work |
+| `deploy` | `sample-ai-deploy` | **no `ssm:*` rights**, and cannot grant them to itself (`iam:PutUserPolicy` denied) | SSM must be driven from the console as root, until `SampleAiDeploySsm` is attached |
 
 aws.exe lives at `C:\Program Files\Amazon\AWSCLIV2\aws.exe` (may not be on PATH).
 
@@ -49,7 +50,8 @@ aws sts get-caller-identity
       `sample-ai-ec2-bedrock-profile` (Bedrock invoke + `ecr:GetAuthorizationToken`
       and pull-only access to `repository/sample-ai-api`)
 - [x] Security group `sample-ai-api-sg` (`sg-01918d764450132ea`): 443 and 80 open to the
-      world (nginx), SSH 22 restricted to the admin IP, all egress. No public 8080 rule.
+      world (nginx), all egress. No public 8080 rule. **No inbound SSH rule at all** -
+      port 22 is closed, host access is via SSM (see below).
 - [x] Elastic IP `18.102.200.77` (`eipalloc-0fb3d98e77dfb9934`,
       assoc `eipassoc-0270f0c126ce5ce5e`) — IP now survives stop/start
 - [x] Free DNS name `arlingtonqwen.duckdns.org` (DuckDNS A record -> Elastic IP)
@@ -85,6 +87,16 @@ aws sts get-caller-identity
       nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`; `/api/` rate limited to
       `10r/s` with `burst=20 nodelay`, answered as **429**. Verified: a 40-request burst
       produced 22x200 + 18x429, and a single request after 3 s returned 200 again.
+
+- [x] **SSM Session Manager works** - shell access through the AWS console, no port 22 and
+      no key file. Inline policy `SampleAiSsmSessionPolicy` on
+      `sample-ai-ec2-bedrock-role` grants `ssm:UpdateInstanceInformation`,
+      `ssm:ListInstanceAssociations`, the four `ssmmessages` channel actions and the four
+      `ec2messages` message actions. Proven by sending `docker compose ps` **through AWS**
+      (the instance was temporarily allowed to command itself, scoped to its own ARN, then
+      that permission was deleted again).
+- [x] **Port 22 closed** (`admin-ssh` rule removed from `sg-01918d764450132ea`). The host
+      now accepts only 80 and 443. Site, API and health stayed `200` after the change.
 
 Public IP is the Elastic IP `18.102.200.77`; it no longer changes on stop/start.
 Re-read it with:
@@ -130,15 +142,38 @@ docker push "$reg/sample-ai-api:latest"
 
 ## Redeploying after a code change
 
+Port 22 is closed, so the old `docker save | ssh | docker load` path no longer works as
+written. Two ways forward; pick per situation.
+
+### Immediate: temporary SSH window (works today, no new AWS resources)
+
+Open 22 only to your current IP, deploy, close it again. The port is exposed for minutes,
+not permanently.
+
 ```powershell
+$aws = 'C:\Program Files\Amazon\AWSCLIV2\aws.exe'
 $pem = "$env:USERPROFILE\.ssh\sample-ai-key.pem"
+$myip = (Invoke-RestMethod 'https://checkip.amazonaws.com').Trim()
+
+# 1. open the window
+& $aws ec2 authorize-security-group-ingress --group-id sg-01918d764450132ea `
+  --region eu-south-1 --profile deploy `
+  --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=$myip/32,Description=admin-ssh}]"
+
+# 2. deploy
 docker build -t sample-ai-api .
 cmd /c "docker save sample-ai-api:latest | ssh -i $pem ec2-user@18.102.200.77 `"docker load`""
 ssh -i $pem ec2-user@18.102.200.77 "cd /home/ec2-user/app && docker compose up -d --pull never api"
+
+# 3. close the window - do not skip this
+& $aws ec2 revoke-security-group-ingress --group-id sg-01918d764450132ea `
+  --region eu-south-1 --profile deploy `
+  --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=$myip/32}]"
 ```
 
-`docker-compose.yml`, `nginx/default.conf` and `.env` (holding `ECR_IMAGE`) live in
-`/home/ec2-user/app` on the instance. After editing either file locally, copy it:
+To edit `docker-compose.yml`, `nginx/default.conf` or `.env` (all in `/home/ec2-user/app`
+on the instance) use the same window with `scp`, or change them in place from a Session
+Manager terminal:
 
 ```powershell
 scp -i $pem docker-compose.yml ec2-user@18.102.200.77:/home/ec2-user/app/
@@ -146,14 +181,126 @@ scp -i $pem nginx/default.conf ec2-user@18.102.200.77:/home/ec2-user/app/nginx/
 ssh -i $pem ec2-user@18.102.200.77 "cd /home/ec2-user/app && docker compose up -d --pull never"
 ```
 
-The ECR-shaped tag is applied on the host, so once ECR works the switch is just a
-`docker login` + `docker push` — no compose edit.
+### Target: registry-based, no SSH at all
+
+Once `sample-ai-api` exists in ECR (see above), deploying needs neither SSH nor a temporary
+port: push the image, then ask the agent to pull it.
+
+```powershell
+$reg = '401905377384.dkr.ecr.eu-south-1.amazonaws.com'
+& $aws ecr get-login-password --region eu-south-1 --profile deploy |
+    docker login --username AWS --password-stdin $reg
+docker tag sample-ai-api:latest "$reg/sample-ai-api:latest"
+docker push "$reg/sample-ai-api:latest"
+
+& $aws ssm send-command --instance-ids i-0a904020481f92b78 --region eu-south-1 --profile deploy `
+  --document-name AWS-RunShellScript `
+  --parameters commands='cd /home/ec2-user/app && docker compose pull api && docker compose up -d api'
+```
+
+Until then the image on the host keeps the ECR-shaped tag, so `docker-compose.yml` needs no
+edit when the switch happens.
 
 ---
 
+## Access without SSH (SSM Session Manager)
+
+Plain Docker Compose on EC2 is **not** ECS or EKS, so AWS has no container-level view in
+the console. The containers do not appear anywhere. What SSM gives you is a shell *inside*
+the instance from the browser, which is enough to run `docker compose ps` and friends.
+
+Port 22 is closed. There is no inbound SSH rule on `sg-01918d764450132ea` any more, so
+`ssh` and `scp` both fail by design.
+
+### Open a shell
+
+Console as root, region **Europe (Milan) `eu-south-1`** ->
+**Systems Manager** -> **Session Manager** -> **Start session** ->
+select `i-0a904020481f92b78` -> **Start session**.
+
+You land as `ssm-user`; `sudo -i` for root. No key file, no Session Manager plugin - the
+console terminal is built in.
+
+```bash
+cd /home/ec2-user/app
+docker compose ps
+docker compose logs --tail 50 api
+```
+
+### Run a one-off command without a session
+
+**Systems Manager** -> **Run Command** -> document `AWS-RunShellScript` -> target the
+instance -> paste commands -> **Run**. Output appears under **Output**.
+
+### The IAM policy, and why each line exists
+
+`SampleAiSsmSessionPolicy` is inline on `sample-ai-ec2-bedrock-role`:
+
+| action | why |
+|---|---|
+| `ssm:UpdateInstanceInformation` | the agent's "hello, I exist" call; without it the instance never registers |
+| `ssm:ListInstanceAssociations` | State Manager bookkeeping; not needed for a shell, but its denial spams the log |
+| `ssmmessages:CreateControlChannel` / `OpenControlChannel` | the always-on websocket to the service |
+| `ssmmessages:CreateDataChannel` / `OpenDataChannel` | the data path a session or command uses |
+| `ec2messages:GetMessages` + `AcknowledgeMessage` / `DeleteMessage` / `SendReply` | the queue the service hands work to the agent through |
+
+This is deliberately narrower than the AWS-managed `AmazonSSMManagedInstanceCore`.
+
+### Traps, in the order they bit
+
+1. The agent reports **one** denied action at a time, so permissions have to be added in
+   rounds. `UpdateInstanceInformation` passed first, then `ec2messages:GetMessages`, then
+   `ListInstanceAssociations` - three restarts before the log was clean.
+2. The action is **`ssm:ListInstanceAssociations`**. `ssm:ListAssociations` does not exist;
+   only the untruncated log line reveals the real name (`cut -c200-620`, not `cut -c1-140`).
+3. `RequestManagedInstanceRoleToken: instance management role is not configured` is not a
+   separate problem. It means the role grants no SSM rights, and it clears by itself.
+4. **"MDS Polling job stopped" is normal.** The poll loop stops when idle and wakes on
+   demand; twice it looked like the cause of the failure, and twice a real command ran
+   fine afterwards. Do not chase it.
+5. Credentials are cached by the agent and rotated roughly every 27 minutes
+   (`Next credential rotation will be in ... minutes` in the log). A freshly attached
+   policy can look ignored for a few minutes; `sudo systemctl restart amazon-ssm-agent`
+   forces a re-read.
+6. The `deploy` CLI user cannot verify any of this: it has no `ssm:*` rights and cannot
+   grant them to itself (`iam:PutUserPolicy` denied). The console as root can.
+
+### Getting the CLI working too
+
+Attach the policy saved at `..\ssm-deploy-policy.json` (also in this conversation) to the
+IAM user `sample-ai-deploy`: IAM -> Users -> `sample-ai-deploy` -> Permissions ->
+Add permissions -> Create inline policy -> JSON -> paste -> name it `SampleAiDeploySsm`.
+
+`Resource: "*"` is unavoidable for most of it, because `StartSession` authorises against a
+session ARN that does not exist until the session starts. Then:
+
+```powershell
+$env:AWS_PROFILE='deploy'
+aws ssm start-session --target i-0a904020481f92b78 --region eu-south-1   # needs the Session Manager plugin
+aws ssm send-command --instance-ids i-0a904020481f92b78 --region eu-south-1 `
+  --document-name AWS-RunShellScript --parameters commands='docker ps'   # no plugin needed
+```
+
+### If you ever need SSH back
+
+The `deploy` user still holds `ec2:AuthorizeSecurityGroupIngress`, so re-opening is one
+command, and it is worth adding it as a `/32` only, never `0.0.0.0/0`:
+
+```powershell
+aws ec2 authorize-security-group-ingress --group-id sg-01918d764450132ea `
+  --region eu-south-1 --profile deploy `
+  --ip-permissions 'IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=YOUR.IP.HERE/32,Description=admin-ssh}]'
+```
+
+Why SSH was closed at all: the admin rule was pinned to the home IP, which rotated four
+times in one session (`94.33.194.162` -> `.165` -> `94.33.255.117` -> ...), locking the
+owner out each time. Closing 22 removes both the lockout and the exposed port.
+
 ## Remaining steps
 
-1. **ECR repo** `sample-ai-api` — optional; see the workaround notes above.
+1. **ECR repo** `sample-ai-api` — no longer merely optional. With port 22 closed it is the
+   only way to deploy without opening a temporary SSH window; see the workaround notes and
+   the registry-based deploy path above.
 2. Optional later: move the frontend to **S3 + CloudFront** for CDN caching and atomic
    deploys. Needs `sample-ai-deploy` to gain S3 + CloudFront permissions first (it has
    neither today: `s3:ListAllMyBuckets` and `cloudfront:ListDistributions` both return
@@ -309,6 +456,15 @@ aws ec2 start-instances --instance-ids i-0a904020481f92b78 --region eu-south-1 -
 # public HTTPS smoke test
 curl.exe -sS "https://arlingtonqwen.duckdns.org/api/ai/generate?message=ciao"
 curl.exe -sS https://arlingtonqwen.duckdns.org/health
+
+# host access: port 22 is closed, use SSM instead
+aws ssm start-session --target i-0a904020481f92b78 --region eu-south-1 --profile deploy
+aws ssm send-command --instance-ids i-0a904020481f92b78 --region eu-south-1 --profile deploy `
+  --document-name AWS-RunShellScript --parameters commands='cd /home/ec2-user/app && docker compose ps'
+
+# what SSH rules exist right now (should be none)
+aws ec2 describe-security-groups --group-ids sg-01918d764450132ea --region eu-south-1 `
+  --profile deploy --query 'SecurityGroups[0].IpPermissions[?FromPort==`22`].IpRanges' --output text
 
 # is Chroma up locally?
 docker ps --filter name=chroma
